@@ -1,159 +1,202 @@
 const Lead = require("../models/leadModel");
 const User = require("../models/userModel");
-
-// @route   GET api/leads
-// @desc    Get all leads
-// @access  Private
+/**
+ * @route   GET /api/leads
+ * @desc    Get leads based on user role (all for employer, only own leads for manager)
+ * @access  Private
+ */
 exports.getLeads = async (req, res) => {
   try {
-    // Different behavior based on user role
-    if (req.user.role === "manager") {
-      // Managers only see leads assigned to them
-      const leads = await Lead.find({ manager: req.user.id })
+    let leads;
+    
+    // Si c'est un employeur, récupérer tous les leads
+    if (req.user.role === 'employer') {
+      leads = await Lead.find()
+        .populate('manager', 'name email')
         .sort({ createdAt: -1 })
-        .populate("manager", "name email");
-      res.json(leads);
+        .lean();
+    } 
+    // Si c'est un manager, récupérer uniquement ses leads
+    else if (req.user.role === 'manager') {
+      leads = await Lead.find({ manager: req.user._id })
+        .sort({ createdAt: -1 })
+        .lean();
     } else {
-      // Employees see all leads
-      const leads = await Lead.find()
-        .sort({ createdAt: -1 })
-        .populate("manager", "name email");
-      res.json(leads);
+      return res.status(403).json({
+        success: false,
+        error: "Accès non autorisé"
+      });
     }
+
+    res.status(200).json({
+      success: true,
+      count: leads.length,
+      data: leads
+    });
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send("Server Error");
+    console.error("Error fetching leads:", err.message);
+    res.status(500).json({
+      success: false,
+      error: "Erreur serveur lors de la récupération des leads"
+    });
   }
 };
 
-// @route   GET api/leads/:id
-// @desc    Get lead by ID
-// @access  Private
-exports.getLeadById = async (req, res) => {
-  try {
-    const lead = await Lead.findById(req.params.id).populate(
-      "manager",
-      "name email"
-    );
-
-    if (!lead) {
-      return res.status(404).json({ msg: "Lead not found" });
-    }
-
-    // Check if user is authorized to view this lead (managers can only see their own leads)
-    if (
-      req.user.role === "manager" &&
-      lead.manager.id.toString() !== req.user.id
-    ) {
-      return res.status(403).json({ msg: "Not authorized" });
-    }
-
-    res.json(lead);
-  } catch (err) {
-    console.error(err.message);
-    if (err.kind === "ObjectId") {
-      return res.status(404).json({ msg: "Lead not found" });
-    }
-    res.status(500).send("Server Error");
-  }
-};
-
-// @route   POST api/leads
-// @desc    Create a lead
-// @access  Private (only managers)
+/**
+ * @route   POST /api/leads
+ * @desc    Create a new lead
+ * @access  Private (Employer only)
+ */
 exports.createLead = async (req, res) => {
-  const { name, email, phone, company, status, value, notes } = req.body;
-
   try {
-    // Create new lead
-    const newLead = new Lead({
+    // Vérifier si l'utilisateur est un employeur
+    if (req.user.role !== 'employer') {
+      return res.status(403).json({
+        success: false,
+        error: "Accès refusé. Seuls les employeurs peuvent créer des leads"
+      });
+    }
+
+    const { name, email, phone, company, value, notes, manager } = req.body;
+
+    // Vérifier si le manager existe
+    const managerExists = await User.findOne({ _id: manager, role: 'manager' });
+    if (!managerExists) {
+      return res.status(404).json({
+        success: false,
+        error: "Manager non trouvé"
+      });
+    }
+
+    // Créer un nouveau lead
+    const lead = new Lead({
       name,
       email,
       phone,
       company,
-      status,
       value,
       notes,
-      manager: req.user.id, // Set current user as manager
+      manager
     });
 
-    const lead = await newLead.save();
-    res.json(lead);
+    await lead.save();
+
+    res.status(201).json({
+      success: true,
+      data: lead
+    });
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send("Server Error");
+    console.error("Error creating lead:", err.message);
+    res.status(500).json({
+      success: false,
+      error: "Erreur serveur lors de la création du lead"
+    });
   }
 };
 
-// @route   PUT api/leads/:id
-// @desc    Update a lead
-// @access  Private (only manager who owns the lead)
+/**
+ * @route   PUT /api/leads/:id
+ * @desc    Update a lead
+ * @access  Private (Employer or assigned Manager)
+ */
 exports.updateLead = async (req, res) => {
-  const { name, email, phone, company, status, value, notes } = req.body;
-
-  // Build lead object
-  const leadFields = {};
-  if (name) leadFields.name = name;
-  if (email) leadFields.email = email;
-  if (phone) leadFields.phone = phone;
-  if (company) leadFields.company = company;
-  if (status) leadFields.status = status;
-  if (value !== undefined) leadFields.value = value;
-  if (notes) leadFields.notes = notes;
-  leadFields.updatedAt = Date.now();
-
   try {
-    let lead = await Lead.findById(req.params.id);
-
+    const leadId = req.params.id;
+    
+    // Récupérer le lead existant
+    const lead = await Lead.findById(leadId);
     if (!lead) {
-      return res.status(404).json({ msg: "Lead not found" });
+      return res.status(404).json({
+        success: false,
+        error: "Lead non trouvé"
+      });
     }
 
-    // Make sure manager owns the lead
-    if (lead.manager.toString() !== req.user.id) {
-      return res.status(403).json({ msg: "Not authorized" });
+    // Vérifier si l'utilisateur est autorisé à modifier ce lead
+    if (req.user.role === 'manager' && lead.manager.toString() !== req.user._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        error: "Vous ne pouvez modifier que vos propres leads"
+      });
     }
 
-    // Update
-    lead = await Lead.findByIdAndUpdate(
-      req.params.id,
-      { $set: leadFields },
-      { new: true }
-    );
+    const { name, email, phone, company, status, value, notes, manager } = req.body;
 
-    res.json(lead);
+    // Si c'est un employeur qui veut changer le manager, vérifier si le nouveau manager existe
+    if (req.user.role === 'employer' && manager) {
+      const managerExists = await User.findOne({ _id: manager, role: 'manager' });
+      if (!managerExists) {
+        return res.status(404).json({
+          success: false,
+          error: "Manager non trouvé"
+        });
+      }
+      lead.manager = manager;
+    }
+
+    // Mise à jour des champs
+    if (name) lead.name = name;
+    if (email) lead.email = email;
+    if (phone) lead.phone = phone;
+    if (company) lead.company = company;
+    if (status) lead.status = status;
+    if (value !== undefined) lead.value = value;
+    if (notes) lead.notes = notes;
+    
+    lead.updatedAt = Date.now();
+
+    await lead.save();
+
+    res.status(200).json({
+      success: true,
+      data: lead
+    });
   } catch (err) {
-    console.error(err.message);
-    if (err.kind === "ObjectId") {
-      return res.status(404).json({ msg: "Lead not found" });
-    }
-    res.status(500).send("Server Error");
+    console.error("Error updating lead:", err.message);
+    res.status(500).json({
+      success: false,
+      error: "Erreur serveur lors de la mise à jour du lead"
+    });
   }
 };
 
-// @route   DELETE api/leads/:id
-// @desc    Delete a lead
-// @access  Private (only manager who owns the lead)
+/**
+ * @route   DELETE /api/leads/:id
+ * @desc    Delete a lead
+ * @access  Private (Employer only)
+ */
 exports.deleteLead = async (req, res) => {
   try {
-    const lead = await Lead.findById(req.params.id);
+    // Vérifier si l'utilisateur est un employeur
+    if (req.user.role !== 'employer') {
+      return res.status(403).json({
+        success: false,
+        error: "Accès refusé. Seuls les employeurs peuvent supprimer des leads"
+      });
+    }
 
+    const leadId = req.params.id;
+    
+    // Vérifier si le lead existe
+    const lead = await Lead.findById(leadId);
     if (!lead) {
-      return res.status(404).json({ msg: "Lead not found" });
+      return res.status(404).json({
+        success: false,
+        error: "Lead non trouvé"
+      });
     }
 
-    // Check ownership
-    if (lead.manager.toString() !== req.user.id) {
-      return res.status(403).json({ msg: "Not authorized" });
-    }
+    await Lead.findByIdAndDelete(leadId);
 
-    await lead.deleteOne();
-    res.json({ msg: "Lead removed" });
+    res.status(200).json({
+      success: true,
+      message: "Lead supprimé avec succès"
+    });
   } catch (err) {
-    console.error(err.message);
-    if (err.kind === "ObjectId") {
-      return res.status(404).json({ msg: "Lead not found" });
-    }
-    res.status(500).send("Server Error");
+    console.error("Error deleting lead:", err.message);
+    res.status(500).json({
+      success: false,
+      error: "Erreur serveur lors de la suppression du lead"
+    });
   }
 };

@@ -72,3 +72,120 @@ exports.getAllManagers = async (req, res) => {
     res.status(500).send("Server Error");
   }
 };
+
+/**
+ * @route   GET /api/leads
+ * @desc    Get all leads
+ * @access  Private
+ * @returns {Array} List of all leads
+ */
+exports.getAllLeads = async (req, res) => {
+  try {
+    const leads = await Lead.find()
+      .populate('manager', 'name email -_id')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    res.status(200).json({
+      success: true,
+      count: leads.length,
+      data: leads,
+    });
+  } catch (err) {
+    console.error("Error fetching leads:", err.message);
+    res.status(500).json({
+      success: false,
+      error: "Server error occurred while fetching leads",
+    });
+  }
+};
+
+
+exports.updateManager = async (req, res) => {
+  try {
+    // Vérifier si l'utilisateur actuel est un employeur
+    if (req.user.role !== 'employer') {
+      return res.status(403).json({
+        success: false,
+        error: "Accès refusé. Seuls les employeurs peuvent modifier des managers"
+      });
+    }
+
+    const { name, email } = req.body;
+    const managerId = req.params.id;
+
+    // Vérifier si le manager existe
+    let manager = await User.findById(managerId);
+    if (!manager || manager.role !== 'manager') {
+      return res.status(404).json({
+        success: false,
+        error: "Manager non trouvé"
+      });
+    }
+
+    // Mise à jour des champs
+    if (name) manager.name = name;
+    if (email) manager.email = email;
+
+    await manager.save();
+
+    res.status(200).json({
+      success: true,
+      data: {
+        id: manager._id,
+        name: manager.name,
+        email: manager.email,
+        role: manager.role
+      }
+    });
+  } catch (err) {
+    console.error("Error updating manager:", err.message);
+    res.status(500).json({
+      success: false,
+      error: "Erreur serveur lors de la mise à jour du manager"
+    });
+  }
+};
+
+
+/**
+ * @route   DELETE /api/users/managers/:id
+ * @desc    Delete a manager
+ * @access  Private (Employer only)
+ */
+exports.deleteManager = async (req, res) => {
+  try {
+    // Vérifier si l'utilisateur actuel est un employeur
+    if (req.user.role !== 'employer') {
+      return res.status(403).json({
+        success: false,
+        error: "Accès refusé. Seuls les employeurs peuvent supprimer des managers"
+      });
+    }
+
+    const managerId = req.params.id;
+
+    // Vérifier si le manager existe
+    let manager = await User.findById(managerId);
+    if (!manager || manager.role !== 'manager') {
+      return res.status(404).json({
+        success: false,
+        error: "Manager non trouvé"
+      });
+    }
+
+    // Supprimer le manager
+    await User.findByIdAndDelete(managerId);
+
+    res.status(200).json({
+      success: true,
+      message: "Manager supprimé avec succès"
+    });
+  } catch (err) {
+    console.error("Error deleting manager:", err.message);
+    res.status(500).json({
+      success: false,
+      error: "Erreur serveur lors de la suppression du manager"
+    });
+  }
+};
